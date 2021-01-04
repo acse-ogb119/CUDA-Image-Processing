@@ -1,6 +1,7 @@
 #include <iostream>
 
 #include <cuda_runtime.h>
+#include <thrust/device_vector.h>
 #include <thrust/device_ptr.h>
 #include <thrust/reduce.h>
 #include <thrust/scan.h>
@@ -88,9 +89,12 @@ __global__ void tonemap_kernel(const float *const d_x, const float *const d_y,
     }
 }
 
-void preProcess(float **imgPtr, float **imgPtrHDR,
-                float **d_logLuminance, float **d_x, float **d_y,
-                unsigned int **d_cdf,
+void preProcess(thrust::device_vector<float> &imgData,
+                thrust::device_vector<float> &imgHDR,
+                thrust::device_vector<float> &d_x,
+                thrust::device_vector<float> &d_y,
+                thrust::device_vector<float> &d_logLuminance,
+                thrust::device_vector<unsigned int> &d_cdf,
                 size_t &rows, size_t &cols,
                 const std::string &filename)
 {
@@ -98,91 +102,64 @@ void preProcess(float **imgPtr, float **imgPtrHDR,
     checkCudaErrors(cudaFree(0));
 
     // allocate and load input image
-    loadImageHDR(filename, imgPtr, &rows, &cols);
+    loadImageHDR(filename, imgData, rows, cols);
     // allocate output image
-    *imgPtrHDR = new float[rows * cols * 3];
+    size_t numPixels = rows * cols;
+    imgHDR.resize(numPixels * 3);
+    d_x.resize(numPixels);
+    d_y.resize(numPixels);
+    d_logLuminance.resize(numPixels);
+    d_cdf.assign(numBins, 0);
 
     //first thing to do is split incoming BGR float data into separate channels
-    size_t numPixels = rows * cols;
-    float *red = new float[numPixels];
-    float *green = new float[numPixels];
-    float *blue = new float[numPixels];
+    thrust::device_vector<float> d_red(numPixels);
+    thrust::device_vector<float> d_green(numPixels);
+    thrust::device_vector<float> d_blue(numPixels);
 
-    //loadImageHDR keeps BGR format
-    for (size_t i = 0; i < numPixels; ++i)
-    {
-        blue[i] = (*imgPtr)[3 * i];
-        green[i] = (*imgPtr)[3 * i + 1];
-        red[i] = (*imgPtr)[3 * i + 2];
-    }
-
-    float *d_red, *d_green, *d_blue; //RGB space
-
-    size_t channelSize = sizeof(float) * numPixels;
-    checkCudaErrors(cudaMalloc(&d_red, channelSize));
-    checkCudaErrors(cudaMalloc(&d_green, channelSize));
-    checkCudaErrors(cudaMalloc(&d_blue, channelSize));
-    checkCudaErrors(cudaMalloc(d_x, channelSize));
-    checkCudaErrors(cudaMalloc(d_y, channelSize));
-    checkCudaErrors(cudaMalloc(d_logLuminance, channelSize));
-
-    checkCudaErrors(cudaMemcpy(d_red, red, channelSize, cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(d_green, green, channelSize, cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(d_blue, blue, channelSize, cudaMemcpyHostToDevice));
+    //split the image channels
+    //TODO
+    // auto zipIterator = thrust::make_zip_iterator(thrust::make_tuple(blue.begin(), green.begin(), red.begin()));
+    // thrust::scatter(imgData.begin(), imgData.end(), ???, zipIterator);
 
     //convert from RGB space to chrominance/luminance space xyY
     dim3 blockSize(32, 16, 1);
     dim3 gridSize((cols + blockSize.x - 1) / blockSize.x,
                   (rows + blockSize.y - 1) / blockSize.y, 1);
-    rgb_to_xyY_kernel<<<gridSize, blockSize>>>(d_red, d_green, d_blue,
-                                               *d_x, *d_y, *d_logLuminance,
+    rgb_to_xyY_kernel<<<gridSize, blockSize>>>(thrust::raw_pointer_cast(d_red.data()),
+                                               thrust::raw_pointer_cast(d_green.data()),
+                                               thrust::raw_pointer_cast(d_blue.data()),
+                                               thrust::raw_pointer_cast(d_x.data()),
+                                               thrust::raw_pointer_cast(d_y.data()),
+                                               thrust::raw_pointer_cast(d_logLuminance.data()),
                                                .0001f, rows, cols);
     cudaDeviceSynchronize();
     checkCudaErrors(cudaGetLastError());
-
-    //allocate memory for the cdf of the histogram
-    checkCudaErrors(cudaMalloc(d_cdf, sizeof(unsigned int) * numBins));
-    checkCudaErrors(cudaMemset(*d_cdf, 0, sizeof(unsigned int) * numBins));
-
-    checkCudaErrors(cudaFree(d_red));
-    checkCudaErrors(cudaFree(d_green));
-    checkCudaErrors(cudaFree(d_blue));
-    delete[] red;
-    delete[] green;
-    delete[] blue;
 }
 
-void postProcess(const std::string &output_file, float *const imageHDR,
-                 const float *const d_logLuminance,
-                 const float *const d_x, const float *const d_y,
-                 const unsigned int *const d_cdf,
+void postProcess(const std::string &output_file,
+                 thrust::device_vector<float> &imageHDR,
+                 const thrust::device_vector<float> &d_logLuminance,
+                 const thrust::device_vector<float> &d_x,
+                 const thrust::device_vector<float> &d_y,
+                 const thrust::device_vector<unsigned int> &d_cdf,
                  const int numRows, const int numCols,
                  const float min_log_Y, const float max_log_Y)
 {
     //first normalize the cdf to a maximum value of 1
     //this is how we compress the range of the luminance channel
-    float *d_cdf_normalized;
-    checkCudaErrors(cudaMalloc(&d_cdf_normalized, sizeof(float) * numBins));
+    thrust::device_vector<float> d_cdf_normalized(numBins);
 
     int numThreads = 192;
     int numBlocks = (numBins + numThreads - 1) / numThreads;
-    normalize_cdf<<<numBlocks, numThreads>>>(d_cdf, d_cdf_normalized, numBins);
+    normalize_cdf<<<numBlocks, numThreads>>>(thrust::raw_pointer_cast(d_cdf.data()),
+                                             thrust::raw_pointer_cast(d_cdf_normalized.data()),
+                                             numBins);
     cudaDeviceSynchronize();
     checkCudaErrors(cudaGetLastError());
 
     //allocate memory for the output RGB channels
     size_t numPixels = numRows * numCols;
-
-    float *h_red, *h_green, *h_blue;
-    float *d_red, *d_green, *d_blue;
-
-    h_red = new float[numPixels];
-    h_green = new float[numPixels];
-    h_blue = new float[numPixels];
-
-    checkCudaErrors(cudaMalloc(&d_red, sizeof(float) * numPixels));
-    checkCudaErrors(cudaMalloc(&d_green, sizeof(float) * numPixels));
-    checkCudaErrors(cudaMalloc(&d_blue, sizeof(float) * numPixels));
+    thrust::device_vector<float> d_red(numPixels), d_green(numPixels), d_blue(numPixels);
 
     float log_Y_range = max_log_Y - min_log_Y;
 
@@ -190,33 +167,23 @@ void postProcess(const std::string &output_file, float *const imageHDR,
     dim3 gridSize((numCols + blockSize.x - 1) / blockSize.x,
                   (numRows + blockSize.y - 1) / blockSize.y);
     //map each luminance value to its new value and then transform back to RGB space
-    tonemap_kernel<<<gridSize, blockSize>>>(d_x, d_y, d_logLuminance,
-                                            d_cdf_normalized,
-                                            d_red, d_green, d_blue,
+    //TODO: could really use a typedef to avoid all this thrust::raw_pointer_cast(d_vector.data()) repitition
+    tonemap_kernel<<<gridSize, blockSize>>>(thrust::raw_pointer_cast(d_x.data()),
+                                            thrust::raw_pointer_cast(d_y.data()),
+                                            thrust::raw_pointer_cast(d_logLuminance.data()),
+                                            thrust::raw_pointer_cast(d_cdf_normalized.data()),
+                                            thrust::raw_pointer_cast(d_red.data()),
+                                            thrust::raw_pointer_cast(d_green.data()),
+                                            thrust::raw_pointer_cast(d_blue.data()),
                                             min_log_Y, max_log_Y,
                                             log_Y_range, numBins,
                                             numRows, numCols);
     cudaDeviceSynchronize();
     checkCudaErrors(cudaGetLastError());
 
-    checkCudaErrors(cudaMemcpy(h_red, d_red, sizeof(float) * numPixels, cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_green, d_green, sizeof(float) * numPixels, cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_blue, d_blue, sizeof(float) * numPixels, cudaMemcpyDeviceToHost));
-
     //recombine the image channels
-    for (size_t i = 0; i < numPixels; ++i)
-    {
-        imageHDR[3 * i + 0] = h_blue[i];
-        imageHDR[3 * i + 1] = h_green[i];
-        imageHDR[3 * i + 2] = h_red[i];
-    }
+    //TODO
     saveImageHDR(imageHDR, numRows, numCols, output_file);
-
-    //cleanup
-    checkCudaErrors(cudaFree(d_cdf_normalized));
-    delete[] h_red;
-    delete[] h_green;
-    delete[] h_blue;
 }
 
 __global__ void simple_histo_kernel(const float *const d_logLuminance, unsigned int *const d_bins,
@@ -233,6 +200,8 @@ __global__ void simple_histo_kernel(const float *const d_logLuminance, unsigned 
     }
 }
 
+// TODO: this function should take thrust::device_vector 's in directly and do the reduce
+// and exclusive scan on them
 void cuda_histogram_and_prefixsum(const float *const d_logLuminance,
                                   unsigned int *const d_cdf,
                                   float &min_logLum, float &max_logLum,
@@ -267,25 +236,20 @@ void tonemap_HDR(const std::string &input_file, const std::string &output_file)
 {
     size_t numRows, numCols;
 
-    float *imgData, *imgHDR;
-    float *d_x, *d_y;
-    float *d_logLuminance;
-    unsigned int *d_cdf;
+    thrust::device_vector<float> imgData, imgHDR;
+    thrust::device_vector<float> d_x, d_y;
+    thrust::device_vector<float> d_logLuminance;
+    thrust::device_vector<unsigned int> d_cdf;
     float min_logLum, max_logLum;
 
-    preProcess(&imgData, &imgHDR, &d_logLuminance, &d_x, &d_y, &d_cdf, numRows, numCols, input_file);
+    preProcess(imgData, imgHDR, d_logLuminance, d_x, d_y, d_cdf, numRows, numCols, input_file);
 
-    cuda_histogram_and_prefixsum(d_logLuminance, d_cdf, min_logLum, max_logLum, numRows, numCols);
+    cuda_histogram_and_prefixsum(thrust::raw_pointer_cast(d_logLuminance.data()),
+                                 thrust::raw_pointer_cast(d_cdf.data()),
+                                 min_logLum, max_logLum, numRows, numCols);
     cudaDeviceSynchronize();
     checkCudaErrors(cudaGetLastError());
 
     postProcess(output_file, imgHDR, d_logLuminance, d_x, d_y, d_cdf,
                 numRows, numCols, min_logLum, max_logLum);
-
-    checkCudaErrors(cudaFree(d_logLuminance));
-    checkCudaErrors(cudaFree(d_x));
-    checkCudaErrors(cudaFree(d_y));
-    checkCudaErrors(cudaFree(d_cdf));
-    delete[] imgData;
-    delete[] imgHDR;
 }

@@ -2,6 +2,8 @@
 #include <cmath>
 
 #include <cuda_runtime.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 
 #include "../include/utils.h"
 #include "../include/loadSaveImage.h"
@@ -9,12 +11,15 @@
 static const int filterWidth = 9;
 static const float filterSigma = 2.f;
 
-void preProcess(uchar4 **h_inputImageRGBA, uchar4 **h_outputImageRGBA,
-                uchar4 **d_inputImageRGBA, uchar4 **d_outputImageRGBA,
-                unsigned char **d_redBlurred, unsigned char **d_red,
-                unsigned char **d_greenBlurred, unsigned char **d_green,
-                unsigned char **d_blueBlurred, unsigned char **d_blue,
-                float **h_filter, float **d_filter,
+void preProcess(thrust::device_vector<uchar4> &d_inputImageRGBA,
+                thrust::device_vector<uchar4> &d_outputImageRGBA,
+                thrust::device_vector<unsigned char> &d_redBlurred,
+                thrust::device_vector<unsigned char> &d_red,
+                thrust::device_vector<unsigned char> &d_greenBlurred,
+                thrust::device_vector<unsigned char> &d_green,
+                thrust::device_vector<unsigned char> &d_blueBlurred,
+                thrust::device_vector<unsigned char> &d_blue,
+                thrust::device_vector<float> &d_filter,
                 size_t &rows, size_t &cols,
                 const std::string &filename)
 {
@@ -22,22 +27,14 @@ void preProcess(uchar4 **h_inputImageRGBA, uchar4 **h_outputImageRGBA,
     checkCudaErrors(cudaFree(0));
 
     // allocate and load input image
-    loadImageRGBA(filename, h_inputImageRGBA, &rows, &cols);
+    loadImageRGBA(filename, d_inputImageRGBA, rows, cols);
     // allocate output image
-    *h_outputImageRGBA = new uchar4[rows * cols];
-
-    //allocate memory on the device for both input and output
     size_t numPixels = rows * cols;
-    checkCudaErrors(cudaMalloc(d_inputImageRGBA, sizeof(uchar4) * numPixels));
-    checkCudaErrors(cudaMalloc(d_outputImageRGBA, sizeof(uchar4) * numPixels));
-
-    //copy input array to the GPU
-    checkCudaErrors(cudaMemcpy(*d_inputImageRGBA, *h_inputImageRGBA, sizeof(uchar4) * numPixels, cudaMemcpyHostToDevice));
-    //set output array on GPU to all zeros
-    checkCudaErrors(cudaMemset(*d_outputImageRGBA, 0, numPixels * sizeof(uchar4)));
+    d_outputImageRGBA.assign(numPixels, make_uchar4(0, 0, 0, 0));
 
     //create and fill the filter we will convolve with
-    *h_filter = new float[filterWidth * filterWidth];
+    thrust::host_vector<float> h_filter;
+    h_filter.resize(filterWidth * filterWidth);
 
     float filterSum = 0.f; //for normalization
     for (int r = -filterWidth / 2; r <= filterWidth / 2; ++r)
@@ -45,7 +42,7 @@ void preProcess(uchar4 **h_inputImageRGBA, uchar4 **h_outputImageRGBA,
         for (int c = -filterWidth / 2; c <= filterWidth / 2; ++c)
         {
             float filterValue = expf(-(float)(c * c + r * r) / (2.f * filterSigma * filterSigma));
-            (*h_filter)[(r + filterWidth / 2) * filterWidth + c + filterWidth / 2] = filterValue;
+            h_filter[(r + filterWidth / 2) * filterWidth + c + filterWidth / 2] = filterValue;
             filterSum += filterValue; // for normalization
         }
     }
@@ -53,32 +50,26 @@ void preProcess(uchar4 **h_inputImageRGBA, uchar4 **h_outputImageRGBA,
     float normalizationFactor = 1.f / filterSum;
     for (int r = -filterWidth / 2; r <= filterWidth / 2; ++r)
         for (int c = -filterWidth / 2; c <= filterWidth / 2; ++c)
-            (*h_filter)[(r + filterWidth / 2) * filterWidth + c + filterWidth / 2] *= normalizationFactor;
+            h_filter[(r + filterWidth / 2) * filterWidth + c + filterWidth / 2] *= normalizationFactor;
 
     //original
-    checkCudaErrors(cudaMalloc(d_red, sizeof(unsigned char) * numPixels));
-    checkCudaErrors(cudaMalloc(d_green, sizeof(unsigned char) * numPixels));
-    checkCudaErrors(cudaMalloc(d_blue, sizeof(unsigned char) * numPixels));
+    d_red.resize(numPixels);
+    d_green.resize(numPixels);
+    d_blue.resize(numPixels);
 
     //blurred
-    checkCudaErrors(cudaMalloc(d_redBlurred, sizeof(unsigned char) * numPixels));
-    checkCudaErrors(cudaMalloc(d_greenBlurred, sizeof(unsigned char) * numPixels));
-    checkCudaErrors(cudaMalloc(d_blueBlurred, sizeof(unsigned char) * numPixels));
-    checkCudaErrors(cudaMemset(*d_redBlurred, 0, sizeof(unsigned char) * numPixels));
-    checkCudaErrors(cudaMemset(*d_greenBlurred, 0, sizeof(unsigned char) * numPixels));
-    checkCudaErrors(cudaMemset(*d_blueBlurred, 0, sizeof(unsigned char) * numPixels));
+    d_redBlurred.assign(numPixels, 0);
+    d_greenBlurred.assign(numPixels, 0);
+    d_blueBlurred.assign(numPixels, 0);
 
     //filter
-    checkCudaErrors(cudaMalloc(d_filter, sizeof(float) * filterWidth * filterWidth));
-    checkCudaErrors(cudaMemcpy(*d_filter, *h_filter, sizeof(float) * filterWidth * filterWidth, cudaMemcpyHostToDevice));
+    d_filter = h_filter;
 }
 
-void postProcess(const std::string &output_file, uchar4 *const h_outputImage, const uchar4 *const d_outputImage,
-                 const int rows, const int cols)
+void postProcess(const std::string &output_file, thrust::device_vector<uchar4> &d_outputImageRGBA,
+                 const size_t rows, const size_t cols)
 {
-    size_t numPixels = rows * cols;
-    checkCudaErrors(cudaMemcpy(h_outputImage, d_outputImage, sizeof(uchar4) * numPixels, cudaMemcpyDeviceToHost));
-    saveImageRGBA(h_outputImage, rows, cols, output_file);
+    saveImageRGBA(d_outputImageRGBA, rows, cols, output_file);
 }
 
 __global__ void gaussian_blur_kernel(const unsigned char *const inputChannel,
@@ -159,13 +150,15 @@ __global__ void recombineChannels_kernel(const unsigned char *const redChannel,
     outputImageRGBA[thread_1D_pos] = outputPixel;
 }
 
-void cuda_gaussian_blur(const uchar4 *const h_inputImageRGBA, uchar4 *const d_inputImageRGBA,
-                        uchar4 *const d_outputImageRGBA, const int numRows, const int numCols,
+void cuda_gaussian_blur(const uchar4 *const d_inputImageRGBA,
+                        uchar4 *const d_outputImageRGBA,
                         unsigned char *d_redBlurred, unsigned char *d_red,
                         unsigned char *d_greenBlurred, unsigned char *d_green,
                         unsigned char *d_blueBlurred, unsigned char *d_blue,
-                        float *d_filter, const int filterWidth)
+                        float *d_filter, const int filterWidth,
+                        const int numRows, const int numCols)
 {
+    // TODO: optimizing block size and dimension
     // define the dimensions of each thread block (max = 1024 = 32*32)
     int blockW = 32;
     int blockH = 32;
@@ -202,34 +195,22 @@ void gaussian_blur(const std::string &input_file, const std::string &output_file
 {
     size_t numRows, numCols;
 
-    uchar4 *h_inputImageRGBA, *d_inputImageRGBA;
-    uchar4 *h_outputImageRGBA, *d_outputImageRGBA;
-    unsigned char *d_redBlurred, *d_greenBlurred, *d_blueBlurred;
-    unsigned char *d_red, *d_green, *d_blue;
-    float *h_filter, *d_filter;
+    thrust::device_vector<uchar4> inputImageRGBA, outputImageRGBA;
+    thrust::device_vector<unsigned char> red, green, blue;
+    thrust::device_vector<unsigned char> redBlurred, greenBlurred, blueBlurred;
+    thrust::device_vector<float> filter;
 
-    preProcess(&h_inputImageRGBA, &h_outputImageRGBA, &d_inputImageRGBA, &d_outputImageRGBA,
-               &d_redBlurred, &d_red, &d_greenBlurred, &d_green, &d_blueBlurred, &d_blue,
-               &h_filter, &d_filter, numRows, numCols, input_file);
+    preProcess(inputImageRGBA, outputImageRGBA, redBlurred, red, greenBlurred, green, blueBlurred, blue,
+               filter, numRows, numCols, input_file);
 
-    cuda_gaussian_blur(h_inputImageRGBA, d_inputImageRGBA, d_outputImageRGBA, numRows, numCols,
-                       d_redBlurred, d_greenBlurred, d_blueBlurred, d_red, d_green, d_blue,
-                       d_filter, filterWidth);
+    cuda_gaussian_blur(thrust::raw_pointer_cast(inputImageRGBA.data()), thrust::raw_pointer_cast(outputImageRGBA.data()),
+                       thrust::raw_pointer_cast(redBlurred.data()), thrust::raw_pointer_cast(red.data()),
+                       thrust::raw_pointer_cast(greenBlurred.data()), thrust::raw_pointer_cast(green.data()),
+                       thrust::raw_pointer_cast(blueBlurred.data()), thrust::raw_pointer_cast(blue.data()),
+                       thrust::raw_pointer_cast(filter.data()), filterWidth, numRows, numCols);
+
     cudaDeviceSynchronize();
     checkCudaErrors(cudaGetLastError());
 
-    postProcess(output_file, h_outputImageRGBA, d_outputImageRGBA, numRows, numCols);
-
-    checkCudaErrors(cudaFree(d_inputImageRGBA));
-    checkCudaErrors(cudaFree(d_outputImageRGBA));
-    checkCudaErrors(cudaFree(d_filter));
-    checkCudaErrors(cudaFree(d_red));
-    checkCudaErrors(cudaFree(d_green));
-    checkCudaErrors(cudaFree(d_blue));
-    checkCudaErrors(cudaFree(d_redBlurred));
-    checkCudaErrors(cudaFree(d_greenBlurred));
-    checkCudaErrors(cudaFree(d_blueBlurred));
-    delete[] h_inputImageRGBA;
-    delete[] h_outputImageRGBA;
-    delete[] h_filter;
+    postProcess(output_file, outputImageRGBA, numRows, numCols);
 }

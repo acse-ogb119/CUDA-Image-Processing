@@ -1,28 +1,24 @@
 #ifndef LOADSAVEIMAGE_H__
 #define LOADSAVEIMAGE_H__
 
-void loadImageHDR(const std::string &filename,
-                  float **imagePtr,
-                  size_t *numRows, size_t *numCols);
-
 void loadImageRGBA(const std::string &filename,
-                   uchar4 **imagePtr,
-                   size_t *numRows, size_t *numCols);
+                   thrust::device_vector<uchar4> &imageVector,
+                   size_t &numRows, size_t &numCols);
 
-void loadImageGrey(const std::string &filename,
-                   unsigned char **imagePtr,
-                   size_t *numRows, size_t *numCols);
+void loadImageHDR(const std::string &filename,
+                  thrust::device_vector<float> &imageVector,
+                  size_t &numRows, size_t &numCols);
 
-void saveImageRGBA(const uchar4 *const image,
-                   const int numRows, const int numCols,
+void saveImageRGBA(const thrust::device_vector<uchar4> &imageVector,
+                   const size_t numRows, const size_t numCols,
                    const std::string &output_file);
 
-void saveImageGrey(const unsigned char *image,
-                   const int numRows, const int numCols,
+void saveImageGrey(const thrust::device_vector<unsigned char> &imageVector,
+                   const size_t numRows, const size_t numCols,
                    const std::string &output_file);
 
-void saveImageHDR(const float *const image,
-                  const int numRows, const int numCols,
+void saveImageHDR(const thrust::device_vector<float> &imageVector,
+                  const size_t numRows, const size_t numCols,
                   const std::string &output_file);
 
 #endif

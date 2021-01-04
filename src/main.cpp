@@ -21,19 +21,9 @@ int main(int argc, char *argv[])
             convert_grayscale(input_file, output_file);
         else if (operation == "blur")
             gaussian_blur(input_file, output_file);
-        else if (operation == "tonemap")
-            tonemap_HDR(input_file, output_file);
-        else if (operation == "redeye")
-            if (argc > 3)
-                remove_redeye(input_file, other_file, output_file);
-            else
-                std::cerr << "redeye requires a second input template file" << std::endl;
-        else if (operation == "clone")
-            if (argc > 3)
-                seamless_clone(input_file, other_file, output_file);
-            else
-                std::cerr << "clone requires a second input source file" << std::endl;
+        // else if (operation == "tonemap")
+        //     tonemap_HDR(input_file, output_file);
         else
-            std::cerr << "Unknown operation - options: grayscale, blur, tonemap, redeye, clone" << std::endl;
+            std::cerr << "Unknown operation - options: grayscale, blur" << std::endl;
     }
 }
