@@ -1,7 +1,6 @@
 #include <iostream>
 
 #include <cuda_runtime.h>
-#include <nppi_color_conversion.h>
 #include <thrust/device_vector.h>
 
 #include "../include/utils.h"

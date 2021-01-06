@@ -15,7 +15,7 @@ OPENCV_LIBS:=-lopencv_core -lopencv_imgproc -lopencv_imgcodecs -lopencv_photo
 CUDA_PATH:=/usr/local/cuda-11.1
 CUDA_INCLUDEPATH:=$(CUDA_PATH)/include
 CUDA_LIBPATH:=$(CUDA_PATH)/lib64/
-CUDA_LIBS:=-lnppc -lnppicc
+CUDA_LIBS:=-lnppc -lnppicc -lnppidei
 
 # GCC
 CXX:=g++

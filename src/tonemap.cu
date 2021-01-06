@@ -1,12 +1,15 @@
 #include <iostream>
 
 #include <cuda_runtime.h>
-#include <thrust/device_vector.h>
 #include <thrust/device_ptr.h>
 #include <thrust/reduce.h>
 #include <thrust/scan.h>
 #include <thrust/functional.h>
 #include <thrust/extrema.h>
+#include <thrust/device_vector.h>
+
+#include <nppi_data_exchange_and_initialization.h>
+#include <opencv2/imgcodecs.hpp>
 
 #include "../include/utils.h"
 #include "../include/loadSaveImage.h"
@@ -112,14 +115,20 @@ void preProcess(thrust::device_vector<float> &imgData,
     d_cdf.assign(numBins, 0);
 
     //first thing to do is split incoming BGR float data into separate channels
-    thrust::device_vector<float> d_red(numPixels);
-    thrust::device_vector<float> d_green(numPixels);
-    thrust::device_vector<float> d_blue(numPixels);
+    thrust::device_vector<float> d_red(numPixels), d_green(numPixels), d_blue(numPixels);
 
     //split the image channels
-    //TODO
+    // thrust::device_vector<float> imgData_SoA(numPixels * 3);
     // auto zipIterator = thrust::make_zip_iterator(thrust::make_tuple(blue.begin(), green.begin(), red.begin()));
     // thrust::scatter(imgData.begin(), imgData.end(), ???, zipIterator);
+    const float *pSrc = thrust::raw_pointer_cast(imgData.data());
+    int nSrcStep = 3 * cols * sizeof(float);
+    float *const aDst[3] = {thrust::raw_pointer_cast(d_blue.data()),
+                            thrust::raw_pointer_cast(d_green.data()),
+                            thrust::raw_pointer_cast(d_red.data())};
+    int nDstStep = cols * sizeof(float);
+    NppiSize oSizeROI{.width = cols, .height = rows};
+    nppiCopy_32f_C3P3R(pSrc, nSrcStep, aDst, nDstStep, oSizeROI);
 
     //convert from RGB space to chrominance/luminance space xyY
     dim3 blockSize(32, 16, 1);
@@ -175,14 +184,21 @@ void postProcess(const std::string &output_file,
                                             thrust::raw_pointer_cast(d_red.data()),
                                             thrust::raw_pointer_cast(d_green.data()),
                                             thrust::raw_pointer_cast(d_blue.data()),
-                                            min_log_Y, max_log_Y,
-                                            log_Y_range, numBins,
-                                            numRows, numCols);
+                                            min_log_Y, max_log_Y, log_Y_range,
+                                            numBins, numRows, numCols);
     cudaDeviceSynchronize();
     checkCudaErrors(cudaGetLastError());
 
     //recombine the image channels
-    //TODO
+    const float *const aSrc[3] = {thrust::raw_pointer_cast(d_blue.data()),
+                                  thrust::raw_pointer_cast(d_green.data()),
+                                  thrust::raw_pointer_cast(d_red.data())};
+    int nSrcStep = numCols * sizeof(float);
+    float *pDst = thrust::raw_pointer_cast(imageHDR.data());
+    int nDstStep = 3 * numCols * sizeof(float);
+    NppiSize oSizeROI{.width = numCols, .height = numRows};
+    nppiCopy_32f_P3C3R(aSrc, nSrcStep, pDst, nDstStep, oSizeROI);
+
     saveImageHDR(imageHDR, numRows, numCols, output_file);
 }
 
@@ -202,8 +218,38 @@ __global__ void simple_histo_kernel(const float *const d_logLuminance, unsigned 
 
 // TODO: this function should take thrust::device_vector 's in directly and do the reduce
 // and exclusive scan on them
-void cuda_histogram_and_prefixsum(const float *const d_logLuminance,
-                                  unsigned int *const d_cdf,
+// void cuda_histogram_and_prefixsum(const float *const d_logLuminance,
+//                                   unsigned int *const d_cdf,
+//                                   float &min_logLum, float &max_logLum,
+//                                   const int numRows, const int numCols)
+// {
+//     int numPixels = numRows * numCols;
+
+//     // 1) find the minimum and maximum value in the input logLuminance channel
+//     //    store in min_logLum and max_logLum
+//     thrust::device_ptr<const float> dev_ptr_logLuminance(d_logLuminance);
+//     max_logLum = thrust::reduce(thrust::device, dev_ptr_logLuminance, dev_ptr_logLuminance + (size_t)numPixels, max_logLum, thrust::maximum<float>());
+//     min_logLum = thrust::reduce(thrust::device, dev_ptr_logLuminance, dev_ptr_logLuminance + (size_t)numPixels, min_logLum, thrust::minimum<float>());
+//     std::cout << max_logLum << " " << min_logLum << std::endl;
+
+//     // 2) subtract them to find the range
+//     float logLum_range = max_logLum - min_logLum;
+
+//     // 3) generate a histogram of all the values in the logLuminance channel using
+//     //    the formula: bin = (lum[i] - lumMin) / lumRange * numBins
+//     int NumThreadsPerBlock = 512;
+//     int NumBlocks = (numPixels + NumThreadsPerBlock - 1) / NumThreadsPerBlock;
+//     dim3 blockSize(NumThreadsPerBlock, 1, 1);
+//     dim3 gridSize(NumBlocks, 1, 1);
+//     simple_histo_kernel<<<gridSize, blockSize>>>(d_logLuminance, d_cdf, min_logLum, logLum_range, numBins, numPixels);
+
+//     // 4) Perform an exclusive scan (prefix sum) on the histogram to get
+//     //    the cumulative distribution of luminance values
+//     thrust::device_ptr<unsigned int> dev_ptr_cdf(d_cdf);
+//     thrust::exclusive_scan(thrust::device, dev_ptr_cdf, dev_ptr_cdf + numBins, dev_ptr_cdf);
+// }
+void cuda_histogram_and_prefixsum(const thrust::device_vector<float> &d_logLuminance,
+                                  thrust::device_vector<unsigned int> &d_cdf,
                                   float &min_logLum, float &max_logLum,
                                   const int numRows, const int numCols)
 {
@@ -211,9 +257,9 @@ void cuda_histogram_and_prefixsum(const float *const d_logLuminance,
 
     // 1) find the minimum and maximum value in the input logLuminance channel
     //    store in min_logLum and max_logLum
-    thrust::device_ptr<const float> dev_ptr_logLuminance(d_logLuminance);
-    max_logLum = thrust::reduce(thrust::device, dev_ptr_logLuminance, dev_ptr_logLuminance + (size_t)numPixels, max_logLum, thrust::maximum<float>());
-    min_logLum = thrust::reduce(thrust::device, dev_ptr_logLuminance, dev_ptr_logLuminance + (size_t)numPixels, min_logLum, thrust::minimum<float>());
+    max_logLum = thrust::reduce(d_logLuminance.begin(), d_logLuminance.end(), max_logLum, thrust::maximum<float>());
+    min_logLum = thrust::reduce(d_logLuminance.begin(), d_logLuminance.end(), min_logLum, thrust::minimum<float>());
+    std::cout << max_logLum << " " << min_logLum << std::endl;
 
     // 2) subtract them to find the range
     float logLum_range = max_logLum - min_logLum;
@@ -224,12 +270,13 @@ void cuda_histogram_and_prefixsum(const float *const d_logLuminance,
     int NumBlocks = (numPixels + NumThreadsPerBlock - 1) / NumThreadsPerBlock;
     dim3 blockSize(NumThreadsPerBlock, 1, 1);
     dim3 gridSize(NumBlocks, 1, 1);
-    simple_histo_kernel<<<gridSize, blockSize>>>(d_logLuminance, d_cdf, min_logLum, logLum_range, numBins, numPixels);
+    simple_histo_kernel<<<gridSize, blockSize>>>(thrust::raw_pointer_cast(d_logLuminance.data()),
+                                                 thrust::raw_pointer_cast(d_cdf.data()),
+                                                 min_logLum, logLum_range, numBins, numPixels);
 
     // 4) Perform an exclusive scan (prefix sum) on the histogram to get
     //    the cumulative distribution of luminance values
-    thrust::device_ptr<unsigned int> dev_ptr_cdf(d_cdf);
-    thrust::exclusive_scan(thrust::device, dev_ptr_cdf, dev_ptr_cdf + numBins, dev_ptr_cdf);
+    thrust::exclusive_scan(d_cdf.begin(), d_cdf.end(), d_cdf.begin());
 }
 
 void tonemap_HDR(const std::string &input_file, const std::string &output_file)
@@ -244,8 +291,10 @@ void tonemap_HDR(const std::string &input_file, const std::string &output_file)
 
     preProcess(imgData, imgHDR, d_logLuminance, d_x, d_y, d_cdf, numRows, numCols, input_file);
 
-    cuda_histogram_and_prefixsum(thrust::raw_pointer_cast(d_logLuminance.data()),
-                                 thrust::raw_pointer_cast(d_cdf.data()),
+    // cuda_histogram_and_prefixsum(thrust::raw_pointer_cast(d_logLuminance.data()),
+    //                              thrust::raw_pointer_cast(d_cdf.data()),
+    //                              min_logLum, max_logLum, numRows, numCols);
+    cuda_histogram_and_prefixsum(d_logLuminance, d_cdf,
                                  min_logLum, max_logLum, numRows, numCols);
     cudaDeviceSynchronize();
     checkCudaErrors(cudaGetLastError());

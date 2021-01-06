@@ -21,9 +21,11 @@ int main(int argc, char *argv[])
             convert_grayscale(input_file, output_file);
         else if (operation == "blur")
             gaussian_blur(input_file, output_file);
-        // else if (operation == "tonemap")
-        //     tonemap_HDR(input_file, output_file);
+        else if (operation == "tonemap")
+            tonemap_HDR(input_file, output_file);
+        else if (operation == "test")
+            test_channel_split(input_file, output_file);
         else
-            std::cerr << "Unknown operation - options: grayscale, blur" << std::endl;
+            std::cerr << "Unknown operation - options: grayscale, blur, tonemap" << std::endl;
     }
 }
